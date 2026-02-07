@@ -48,3 +48,33 @@ export interface MockTrial {
   matchType: 'perfect' | 'excluded' | 'uncertain';
   matchScore: number;
 }
+
+// Types for new UI components
+export interface Trial {
+  id: string;
+  nctId: string;
+  name: string;
+  officialTitle: string;
+  phase: string;
+  sponsor: string;
+  status: 'match' | 'uncertain' | 'exclude';
+  matchScore: number;
+  explanation: string;
+  inclusionCriteria: string[];
+  exclusionCriteria?: string[];
+  failedCriteria?: string[];
+  clinicalTrialsGovLink: string;
+}
+
+export interface PatientProfileData {
+  diagnosis: string;
+  stage: string;
+  mutations: string[];
+  ecog: number;
+}
+
+export interface MatchResultData {
+  summary: string;
+  patientProfile: PatientProfileData;
+  trials: Trial[];
+}

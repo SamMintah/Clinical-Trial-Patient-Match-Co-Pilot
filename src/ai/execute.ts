@@ -6,6 +6,12 @@ import { openai } from '@ai-sdk/openai';
 import { buildExtractionPrompt } from './prompts/extractPatientProfile';
 import { buildAssessmentPrompt } from './prompts/assessTrialFit';
 import { buildMockTrialsPrompt } from './prompts/generateMockTrials';
+import { 
+  validatePatientProfile, 
+  validateMockTrials, 
+  sanitizePatientProfile, 
+  sanitizeMockTrials 
+} from './validation';
 import type { PatientProfile, TrialCriteria, MatchResult, MockTrial } from '@/types';
 
 const AI_TIMEOUT_MS = 10000; // 10 second timeout
@@ -58,7 +64,7 @@ const safeJsonParse = async <T>(
 /**
  * Extracts structured patient profile from free-text clinical notes
  * @param freeText - Raw clinical notes or patient description
- * @returns Structured PatientProfile object
+ * @returns Structured PatientProfile object with validation applied
  */
 export const extractPatient = async (freeText: string): Promise<PatientProfile> => {
   const prompt = buildExtractionPrompt(freeText);
@@ -75,7 +81,23 @@ export const extractPatient = async (freeText: string): Promise<PatientProfile> 
     const parsed = await safeJsonParse<PatientProfile>(response.text, prompt);
     
     if (parsed) {
-      return parsed;
+      // Sanitize AI output (fix common errors)
+      const sanitized = sanitizePatientProfile(parsed);
+      
+      // Validate sanitized profile
+      const validation = validatePatientProfile(sanitized);
+      
+      if (!validation.isValid) {
+        console.error('Patient profile validation failed:', validation.errors);
+        validation.errors.forEach(err => console.error(`  - ${err}`));
+      }
+      
+      if (validation.warnings.length > 0) {
+        console.warn('Patient profile warnings:', validation.warnings);
+        validation.warnings.forEach(warn => console.warn(`  - ${warn}`));
+      }
+      
+      return sanitized;
     }
     
     // Fallback: return empty profile
@@ -164,7 +186,7 @@ export const assessTrial = async (
 /**
  * Generates 3 mock clinical trials for demo purposes
  * @param patientText - Patient description for context
- * @returns Array of 3 MockTrial objects (perfect match, excluded, uncertain)
+ * @returns Array of 3 MockTrial objects (perfect match, excluded, uncertain) with validation applied
  */
 export const generateTrials = async (patientText: string): Promise<MockTrial[]> => {
   const prompt = buildMockTrialsPrompt(patientText);
@@ -180,8 +202,26 @@ export const generateTrials = async (patientText: string): Promise<MockTrial[]> 
     
     const parsed = await safeJsonParse<MockTrial[]>(response.text, prompt);
     
-    if (parsed && Array.isArray(parsed) && parsed.length === 3) {
-      return parsed;
+    if (parsed && Array.isArray(parsed)) {
+      // Sanitize AI output (fix common errors)
+      const sanitized = sanitizeMockTrials(parsed);
+      
+      // Validate sanitized trials
+      const validation = validateMockTrials(sanitized);
+      
+      if (!validation.isValid) {
+        console.error('Mock trials validation failed:', validation.errors);
+        validation.errors.forEach(err => console.error(`  - ${err}`));
+        // Use fallback if validation fails critically
+        return getFallbackTrials();
+      }
+      
+      if (validation.warnings.length > 0) {
+        console.warn('Mock trials warnings:', validation.warnings);
+        validation.warnings.forEach(warn => console.warn(`  - ${warn}`));
+      }
+      
+      return sanitized;
     }
     
     // Fallback: return hardcoded demo trials

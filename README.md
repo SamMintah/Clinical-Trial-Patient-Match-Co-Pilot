@@ -2,7 +2,7 @@
 # MatchEngine Oncology
 
 ## Overview
-This project is a prototype for Hackathon 01, an AI-powered web app that helps clinicians quickly match patients to clinical trials using free-text profiles. Built using AI coding agents (e.g., Cursor with Vercel AI SDK), it demonstrates AI nativeness through NLP for input parsing, semantic matching, and explainable ML. The app is web-based, deployed on Vercel, and uses the BetterTStack framework for fast development.
+This project is a prototype for Hackathon 01, an AI-powered web app that helps clinicians quickly match patients to clinical trials using free-text profiles. Built using AI coding agents (Kiro), it demonstrates AI nativeness through NLP for input parsing and explainable matching. The app is web-based and uses Next.js 14 with the Vercel AI SDK.
 
 ## Problem Statement
 Clinical trial matching is slow, opaque, and inefficient:
@@ -29,17 +29,20 @@ Clinicians (e.g., oncologists) during patient consultations.
 Clinicians input free-text patient profiles; AI provides instant trial matches with explanations, speeding up referrals and reducing opacity.
 
 ### Key Features
-- **Free-Text Input**: Parse messy notes (e.g., "45yo female, breast cancer stage II, HER2+").
-- **AI Matching**: NLP extraction (Vercel AI SDK), semantic embeddings (Hugging Face) on ClinicalTrials.gov data, ML ranking (scikit-learn) with explainability (SHAP).
-- **Output**: Ranked trials, match scores, explanations (e.g., "Excludes due to age"), and visuals.
-- **Empathy/UX**: Simple dashboard with one-click patient summaries; focuses on time-saving for busy docs.
-- **Data**: ClinicalTrials.gov API, UMLS/SNOMED for terms, synthetic mocks via Faker/BioPython.
+- **Free-Text Input**: Parse messy clinical notes into structured patient profiles
+- **AI-Powered Matching**: Three-stage AI pipeline using OpenAI GPT-4o-mini:
+  1. Extract patient data (age, condition, stage, biomarkers, treatments)
+  2. Generate realistic mock trials for demo scenarios
+  3. Assess trial fit with explainable reasoning and conservative scoring
+- **Ranked Results**: Trials sorted by match score (0-100) with color coding
+- **Explainable Outputs**: Plain-English explanations for every match/exclusion
+- **Demo Scope**: Focused on breast cancer with synthetic trials for reliability
 
 ### Why Our Solution is Great and Differentiated
 - **Novelty**: Explainable AI for free-text—beyond black-box tools; clinician-focused for systemic impact.
 - **Problem Research**: Addresses 80% delay stat by targeting referrals; gaps in clinician tools per industry reports.
 - **UX & Empathy**: Intuitive interface understands clinician workflows (e.g., "Scan in 30s").
-- **Technical Execution**: Meaningful AI/ML; works with public data.
+- **Technical Execution**: Meaningful AI/ML; uses mock data for demo reliability.
 - **Communication**: Justified scope (oncology/US) for high-volume impact.
 
 ### Success Looks Like
@@ -56,17 +59,71 @@ Clinicians input free-text patient profiles; AI provides instant trial matches w
 ## System Architecture
 ```mermaid
 graph TD
-    A[Clinician User] -->|Free-Text Patient Profile| B["Frontend Dashboard \n (BetterTStack + Vercel AI SDK)"]
-    B -->|Parsed Input| C["Backend Server \n (Node.js/Express)"]
-    C -->|Fetch & Match Trials| D[ClinicalTrials.gov API]
-    C -->|NLP Extraction & Embeddings| E["AI/ML Layer \n (Hugging Face Models + scikit-learn + SHAP for Explainability)"]
-    E -->|Semantic Comparison| F["Database \n (Mock/Synthetic Data + Cached Trials)"]
-    C -->|Ranked Results with Explanations| B
-    B -->|Visualized Matches & Summaries| A
-    subgraph "Standards Integration"
-    D -->|Criteria Parsing| G[UMLS/SNOMED]
-    end
+    A[Clinician User] -->|Paste Patient Notes| B[Next.js Frontend Dashboard]
+    B -->|POST /api/match| C[Next.js API Route]
+    C -->|Extract Patient Data| D[OpenAI GPT-4o-mini via Vercel AI SDK]
+    C -->|Generate Mock Trials| D
+    C -->|Assess Trial Fit| D
+    D -->|Structured JSON Response| C
+    C -->|Ranked Matches with Explanations| B
+    B -->|Display Results| A
 ```
+
+## AI Validation & Safety
+
+To ensure reliable outputs, we validate all AI-generated data before displaying results to clinicians:
+
+### Patient Profile Validation
+- **Age**: Must be 18-120 years (flags unrealistic values)
+- **Cancer Stage**: Must be I, II, III, or IV (with sub-stages like IIIA, IVB)
+- **ECOG Score**: Must be 0-5 (performance status validation)
+- **Biomarker Contradictions**: Catches impossible combinations (e.g., TNBC cannot be HER2+, ER+, or PR+)
+- **Missing Critical Data**: Warns when stage or biomarkers are absent for cancer patients
+
+### Mock Trial Validation
+- **Trial Count**: Always returns exactly 3 trials (perfect match, excluded, uncertain)
+- **NCT ID Format**: Validates NCT + 8 digits format
+- **Required Fields**: Ensures title, phase, summary, and criteria are present
+- **Match Score Range**: Validates 0-100 score and alignment with matchType
+- **Criteria Completeness**: Requires minimum 3 inclusion and 2 exclusion criteria
+
+### Edge Cases Handled
+- **Format Issues**: Normalizes stage format ("stage III" → "Stage III"), ECOG notation
+- **Impossible Combinations**: Flags Stage 0 metastatic disease, contradictory biomarkers
+- **Missing Data**: Provides warnings when critical fields are absent
+- **Out-of-Range Values**: Clamps ages, scores to valid ranges
+- **Malformed AI Output**: Falls back to hardcoded demo trials if validation fails
+
+### Current Limitations
+- **Mock Data Only**: No real ClinicalTrials.gov API integration (demo reliability)
+- **Breast Cancer Focus**: Optimized for HER2+/ER+/PR+ biomarkers only
+- **US Trials Only**: No international trial support
+- **No EHR Integration**: Manual free-text input required
+- **Single Disease**: Not validated for non-oncology conditions
+- **Conservative Scoring**: May under-match to prioritize patient safety
+
+### Future Improvements
+- Real-time trial database sync with ClinicalTrials.gov API
+- Multi-disease support with disease-specific validation rules
+- EHR integration for automatic patient data extraction
+- Machine learning model trained on actual enrollment outcomes
+- Clinician feedback loop to improve match accuracy
+- Support for rare biomarkers and complex eligibility criteria
+
+## Current Status
+
+✅ **Complete:**
+- AI prompt engineering (extract, generate, assess)
+- API route (`/api/match`) with full matching pipeline
+- Type definitions and error handling
+- Mock trial data for demo scenarios
+- AI design documentation
+- Validation layer for AI outputs (patient profiles, mock trials)
+- Polished UI components (InputScreen, ResultsScreen, MainDashboard)
+
+🚧 **In Progress:**
+- End-to-end integration testing with OpenAI API
+- Deployment to Vercel
 
 ## Getting Started
 
@@ -90,26 +147,41 @@ npm run dev
 ## Tech Stack
 
 - **Framework**: Next.js 14 (App Router)
-- **Language**: TypeScript (strict mode)
+- **Language**: TypeScript (strict mode, no 'any')
 - **Styling**: Tailwind CSS
-- **AI Integration**: Vercel AI SDK
+- **AI Integration**: Vercel AI SDK with OpenAI GPT-4o-mini
+- **Code Generation**: 100% AI-generated via Kiro
+- **Deployment**: Vercel (planned)
 - **Code Style**: Airbnb ESLint config
 
 ## Project Structure
 
 ```
 src/
-├── app/          # Next.js pages (App Router)
-├── components/   # Reusable UI components
-├── api/          # Backend API routes
+├── app/
+│   ├── api/match/    # API route for trial matching
+│   ├── page.tsx      # Main dashboard page
+│   ├── layout.tsx    # Root layout
+│   └── globals.css   # Global styles
+├── components/       # UI components
+│   ├── InputScreen.tsx      # Free-text input interface
+│   ├── ResultsScreen.tsx    # Trial results display
+│   └── MainDashboard.tsx    # State orchestrator
 ├── ai/
-│   └── prompts/  # AI prompt templates for LLM calls
+│   ├── execute.ts    # AI execution layer with error handling
+│   ├── validation.ts # AI output validation and sanitization
+│   └── prompts/      # AI prompt templates for LLM calls
 │       ├── extractPatientProfile.ts  # Parse free-text to structured data
-│       └── assessTrialFit.ts         # Evaluate patient-trial matches
-├── types/        # TypeScript interfaces and types
+│       ├── assessTrialFit.ts         # Evaluate patient-trial matches
+│       └── generateMockTrials.ts     # Generate demo trials
+├── types/            # TypeScript interfaces and types
 └── ...
 docs/
-└── ai-design.md  # AI usage, limitations, and safety guidelines
+└── ai-design.md      # AI usage, limitations, and safety guidelines
+.kiro/
+├── steering/         # Project rules and constraints
+└── specs/            # Feature specifications
+    └── frontend-ui/  # Frontend implementation spec
 ```
 
 ## Development
