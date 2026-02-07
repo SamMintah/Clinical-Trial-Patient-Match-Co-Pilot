@@ -30,10 +30,12 @@ Clinicians input free-text patient profiles; AI provides instant trial matches w
 
 ### Key Features
 - **Free-Text Input**: Parse messy clinical notes into structured patient profiles
-- **AI-Powered Matching**: Three-stage AI pipeline using OpenAI GPT-4o-mini:
-  1. Extract patient data (age, condition, stage, biomarkers, treatments)
-  2. Generate realistic mock trials for demo scenarios
-  3. Assess trial fit with explainable reasoning and conservative scoring
+- **Document Upload with OCR**: Upload scanned medical documents (images, PDFs) and automatically extract text using Tesseract.js
+- **Multi-Model AI Pipeline**: Specialized medical models with intelligent fallbacks
+  - **Clinical-BERT** (Hugging Face): Medical entity extraction from clinical notes
+  - **MedAlpaca** (Hugging Face): Clinical trial eligibility assessment
+  - **Flan-T5** (Hugging Face): Mock trial generation
+  - **OpenAI GPT-4o-mini**: Fallback for all tasks if Hugging Face unavailable
 - **Ranked Results**: Trials sorted by match score (0-100) with color coding
 - **Explainable Outputs**: Plain-English explanations for every match/exclusion
 - **Demo Scope**: Focused on breast cancer with synthetic trials for reliability
@@ -59,15 +61,35 @@ Clinicians input free-text patient profiles; AI provides instant trial matches w
 ## System Architecture
 ```mermaid
 graph TD
-    A[Clinician User] -->|Paste Patient Notes| B[Next.js Frontend Dashboard]
+    A[Clinician User] -->|Paste Notes or Upload Document| B[Next.js Frontend Dashboard]
+    B -->|OCR with Tesseract.js| B
     B -->|POST /api/match| C[Next.js API Route]
-    C -->|Extract Patient Data| D[OpenAI GPT-4o-mini via Vercel AI SDK]
-    C -->|Generate Mock Trials| D
-    C -->|Assess Trial Fit| D
-    D -->|Structured JSON Response| C
-    C -->|Ranked Matches with Explanations| B
-    B -->|Display Results| A
+    C -->|1. Extract Patient Data| D{Hugging Face Available?}
+    D -->|Yes| E[Clinical-BERT]
+    D -->|No| F[OpenAI GPT-4o-mini]
+    E -->|Fallback on Error| F
+    F -->|Patient Profile| C
+    C -->|2. Generate Mock Trials| G{Hugging Face Available?}
+    G -->|Yes| H[Flan-T5]
+    G -->|No| F
+    H -->|Fallback on Error| F
+    F -->|3 Mock Trials| C
+    C -->|3. Assess Trial Fit x3| I{Hugging Face Available?}
+    I -->|Yes| J[MedAlpaca]
+    I -->|No| F
+    J -->|Fallback on Error| F
+    F -->|Match Results| C
+    C -->|Validation Layer| K[Validate & Sanitize]
+    K -->|Ranked Matches with Explanations| B
+    B -->|Display Results with Model Attribution| A
 ```
+
+**Key Components:**
+- **Multi-Model Pipeline**: Tries specialized medical models (Clinical-BERT, MedAlpaca, Flan-T5) first, falls back to OpenAI
+- **OCR Integration**: Tesseract.js for document upload and text extraction
+- **Validation Layer**: Catches AI errors before displaying results (age, stage, biomarkers, trial format)
+- **Model Attribution**: UI footer shows which models were used for transparency
+
 
 ## AI Validation & Safety
 
@@ -137,6 +159,10 @@ npm install
 cp .env.example .env
 ```
 
+Edit `.env` and add:
+- `OPENAI_API_KEY`: Required for fallback AI processing
+- `HUGGINGFACE_API_KEY`: Optional, enables specialized medical models (Clinical-BERT, MedAlpaca, Flan-T5)
+
 3. Run the development server:
 ```bash
 npm run dev
@@ -144,12 +170,39 @@ npm run dev
 
 4. Open [http://localhost:3000](http://localhost:3000) in your browser.
 
+## Multi-Model AI Pipeline
+
+The app uses a sophisticated multi-model approach with intelligent fallbacks:
+
+### Model Selection Strategy
+1. **Primary**: Hugging Face medical models (if API key provided)
+   - Clinical-BERT for extraction
+   - MedAlpaca for assessment
+   - Flan-T5 for generation
+2. **Fallback**: OpenAI GPT-4o-mini (always available)
+
+### Why Multiple Models?
+- **Domain Expertise**: Medical models are fine-tuned on clinical data
+- **Cost Efficiency**: Hugging Face Inference API is often more cost-effective
+- **Reliability**: OpenAI fallback ensures the app always works
+- **Transparency**: Console logs show which model was used for each task
+
+### Model Attribution
+The UI footer displays: "Powered by Clinical-BERT, MedAlpaca & Flan-T5" to acknowledge the medical AI models used.
+
 ## Tech Stack
 
 - **Framework**: Next.js 14 (App Router)
 - **Language**: TypeScript (strict mode, no 'any')
 - **Styling**: Tailwind CSS
-- **AI Integration**: Vercel AI SDK with OpenAI GPT-4o-mini
+- **AI Integration**: 
+  - Hugging Face Inference API (@huggingface/inference)
+    - Clinical-BERT for medical entity extraction
+    - MedAlpaca for clinical assessment
+    - Flan-T5 for trial generation
+  - Vercel AI SDK with OpenAI GPT-4o-mini (fallback)
+- **OCR**: Tesseract.js (browser-based document scanning)
+- **Icons**: Lucide React
 - **Code Generation**: 100% AI-generated via Kiro
 - **Deployment**: Vercel (planned)
 - **Code Style**: Airbnb ESLint config
@@ -164,24 +217,24 @@ src/
 │   ├── layout.tsx    # Root layout
 │   └── globals.css   # Global styles
 ├── components/       # UI components
-│   ├── InputScreen.tsx      # Free-text input interface
+│   ├── InputScreen.tsx      # Free-text input interface with OCR
 │   ├── ResultsScreen.tsx    # Trial results display
 │   └── MainDashboard.tsx    # State orchestrator
 ├── ai/
-│   ├── execute.ts    # AI execution layer with error handling
-│   ├── validation.ts # AI output validation and sanitization
-│   └── prompts/      # AI prompt templates for LLM calls
+│   ├── execute.ts         # AI execution layer with multi-model support
+│   ├── medicalModels.ts   # Hugging Face medical model integrations
+│   ├── validation.ts      # AI output validation and sanitization
+│   └── prompts/           # AI prompt templates for LLM calls
 │       ├── extractPatientProfile.ts  # Parse free-text to structured data
 │       ├── assessTrialFit.ts         # Evaluate patient-trial matches
 │       └── generateMockTrials.ts     # Generate demo trials
 ├── types/            # TypeScript interfaces and types
 └── ...
 docs/
-└── ai-design.md      # AI usage, limitations, and safety guidelines
+├── ai-design.md          # AI usage, limitations, and safety guidelines
+└── validation-guide.md   # Validation architecture documentation
 .kiro/
-├── steering/         # Project rules and constraints
-└── specs/            # Feature specifications
-    └── frontend-ui/  # Frontend implementation spec
+└── steering/             # Project rules and constraints
 ```
 
 ## Development

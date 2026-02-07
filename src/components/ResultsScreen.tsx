@@ -374,7 +374,7 @@ const ResultsScreen: React.FC<ResultsScreenProps> = ({ results, onBack }) => {
       {/* Footer Branding */}
       <footer className="h-10 bg-slate-900 border-t border-slate-800 px-4 sm:px-6 flex items-center justify-between text-white flex-shrink-0">
         <p className="text-[8px] sm:text-[10px] font-black tracking-widest uppercase opacity-60 truncate mr-4">
-          MatchEngine Precision Oncology · HIPAA Secure
+          MatchEngine Precision Oncology · HIPAA Secure · Powered by Clinical-BERT, MedAlpaca & Flan-T5
         </p>
         <div className="flex gap-4 sm:gap-6 text-[8px] sm:text-[10px] font-bold opacity-60 uppercase tracking-tight whitespace-nowrap">
           <span className="hidden xs:inline">Auth: Dr. Smith</span>

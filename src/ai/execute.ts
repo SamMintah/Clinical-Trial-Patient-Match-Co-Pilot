@@ -12,6 +12,12 @@ import {
   sanitizePatientProfile, 
   sanitizeMockTrials 
 } from './validation';
+import {
+  extractWithClinicalBERT,
+  assessWithMedAlpaca,
+  generateWithFlanT5,
+  isHuggingFaceAvailable,
+} from './medicalModels';
 import type { PatientProfile, TrialCriteria, MatchResult, MockTrial } from '@/types';
 
 const AI_TIMEOUT_MS = 10000; // 10 second timeout
@@ -63,6 +69,7 @@ const safeJsonParse = async <T>(
 
 /**
  * Extracts structured patient profile from free-text clinical notes
+ * Uses Hugging Face Clinical-BERT if available, falls back to OpenAI
  * @param freeText - Raw clinical notes or patient description
  * @returns Structured PatientProfile object with validation applied
  */
@@ -70,15 +77,40 @@ export const extractPatient = async (freeText: string): Promise<PatientProfile> 
   const prompt = buildExtractionPrompt(freeText);
   
   try {
-    const response = await Promise.race([
-      generateText({
-        model: MODEL,
-        prompt,
-      }),
-      createTimeout(AI_TIMEOUT_MS),
-    ]);
-    
-    const parsed = await safeJsonParse<PatientProfile>(response.text, prompt);
+    let parsed: PatientProfile | null = null;
+    let modelUsed = 'OpenAI GPT-4o-mini';
+
+    // Try Hugging Face Clinical-BERT first if API key available
+    if (isHuggingFaceAvailable()) {
+      console.log('Attempting extraction with Clinical-BERT...');
+      const hfResult = await extractWithClinicalBERT(freeText);
+      
+      if (hfResult.success && hfResult.data) {
+        try {
+          parsed = JSON.parse(hfResult.data as string) as PatientProfile;
+          modelUsed = hfResult.model;
+          console.log('✓ Clinical-BERT extraction successful');
+        } catch (parseError) {
+          console.warn('Clinical-BERT returned invalid JSON, falling back to OpenAI');
+        }
+      } else {
+        console.warn('Clinical-BERT failed:', hfResult.error);
+      }
+    }
+
+    // Fallback to OpenAI if Hugging Face failed or unavailable
+    if (!parsed) {
+      console.log('Using OpenAI for extraction...');
+      const response = await Promise.race([
+        generateText({
+          model: MODEL,
+          prompt,
+        }),
+        createTimeout(AI_TIMEOUT_MS),
+      ]);
+      
+      parsed = await safeJsonParse<PatientProfile>(response.text, prompt);
+    }
     
     if (parsed) {
       // Sanitize AI output (fix common errors)
@@ -96,6 +128,8 @@ export const extractPatient = async (freeText: string): Promise<PatientProfile> 
         console.warn('Patient profile warnings:', validation.warnings);
         validation.warnings.forEach(warn => console.warn(`  - ${warn}`));
       }
+
+      console.log(`Model used for extraction: ${modelUsed}`);
       
       return sanitized;
     }
@@ -133,6 +167,7 @@ export const extractPatient = async (freeText: string): Promise<PatientProfile> 
 
 /**
  * Assesses how well a patient fits a clinical trial's eligibility criteria
+ * Uses Hugging Face MedAlpaca if available, falls back to OpenAI
  * @param patient - Structured patient profile
  * @param trial - Trial inclusion/exclusion criteria
  * @returns Match result with score, explanations, and recommendations
@@ -144,17 +179,46 @@ export const assessTrial = async (
   const prompt = buildAssessmentPrompt(patient, trial);
   
   try {
-    const response = await Promise.race([
-      generateText({
-        model: MODEL,
-        prompt,
-      }),
-      createTimeout(AI_TIMEOUT_MS),
-    ]);
-    
-    const parsed = await safeJsonParse<MatchResult>(response.text, prompt);
+    let parsed: MatchResult | null = null;
+    let modelUsed = 'OpenAI GPT-4o-mini';
+
+    // Try Hugging Face MedAlpaca first if API key available
+    if (isHuggingFaceAvailable()) {
+      console.log('Attempting assessment with MedAlpaca...');
+      const patientJson = JSON.stringify(patient, null, 2);
+      const criteriaJson = JSON.stringify(trial, null, 2);
+      
+      const hfResult = await assessWithMedAlpaca(patientJson, criteriaJson);
+      
+      if (hfResult.success && hfResult.data) {
+        try {
+          parsed = JSON.parse(hfResult.data as string) as MatchResult;
+          modelUsed = hfResult.model;
+          console.log('✓ MedAlpaca assessment successful');
+        } catch (parseError) {
+          console.warn('MedAlpaca returned invalid JSON, falling back to OpenAI');
+        }
+      } else {
+        console.warn('MedAlpaca failed:', hfResult.error);
+      }
+    }
+
+    // Fallback to OpenAI if Hugging Face failed or unavailable
+    if (!parsed) {
+      console.log('Using OpenAI for assessment...');
+      const response = await Promise.race([
+        generateText({
+          model: MODEL,
+          prompt,
+        }),
+        createTimeout(AI_TIMEOUT_MS),
+      ]);
+      
+      parsed = await safeJsonParse<MatchResult>(response.text, prompt);
+    }
     
     if (parsed) {
+      console.log(`Model used for assessment: ${modelUsed}`);
       return parsed;
     }
     
@@ -185,6 +249,7 @@ export const assessTrial = async (
 
 /**
  * Generates 3 mock clinical trials for demo purposes
+ * Uses Hugging Face Flan-T5 if available, falls back to OpenAI
  * @param patientText - Patient description for context
  * @returns Array of 3 MockTrial objects (perfect match, excluded, uncertain) with validation applied
  */
@@ -192,15 +257,43 @@ export const generateTrials = async (patientText: string): Promise<MockTrial[]> 
   const prompt = buildMockTrialsPrompt(patientText);
   
   try {
-    const response = await Promise.race([
-      generateText({
-        model: MODEL,
-        prompt,
-      }),
-      createTimeout(AI_TIMEOUT_MS),
-    ]);
-    
-    const parsed = await safeJsonParse<MockTrial[]>(response.text, prompt);
+    let parsed: MockTrial[] | null = null;
+    let modelUsed = 'OpenAI GPT-4o-mini';
+
+    // Try Hugging Face Flan-T5 first if API key available
+    if (isHuggingFaceAvailable()) {
+      console.log('Attempting trial generation with Flan-T5...');
+      const hfResult = await generateWithFlanT5(patientText);
+      
+      if (hfResult.success && hfResult.data) {
+        try {
+          const parsedData = JSON.parse(hfResult.data as string);
+          if (Array.isArray(parsedData)) {
+            parsed = parsedData as MockTrial[];
+            modelUsed = hfResult.model;
+            console.log('✓ Flan-T5 generation successful');
+          }
+        } catch (parseError) {
+          console.warn('Flan-T5 returned invalid JSON, falling back to OpenAI');
+        }
+      } else {
+        console.warn('Flan-T5 failed:', hfResult.error);
+      }
+    }
+
+    // Fallback to OpenAI if Hugging Face failed or unavailable
+    if (!parsed) {
+      console.log('Using OpenAI for trial generation...');
+      const response = await Promise.race([
+        generateText({
+          model: MODEL,
+          prompt,
+        }),
+        createTimeout(AI_TIMEOUT_MS),
+      ]);
+      
+      parsed = await safeJsonParse<MockTrial[]>(response.text, prompt);
+    }
     
     if (parsed && Array.isArray(parsed)) {
       // Sanitize AI output (fix common errors)
@@ -220,6 +313,8 @@ export const generateTrials = async (patientText: string): Promise<MockTrial[]> 
         console.warn('Mock trials warnings:', validation.warnings);
         validation.warnings.forEach(warn => console.warn(`  - ${warn}`));
       }
+
+      console.log(`Model used for trial generation: ${modelUsed}`);
       
       return sanitized;
     }
