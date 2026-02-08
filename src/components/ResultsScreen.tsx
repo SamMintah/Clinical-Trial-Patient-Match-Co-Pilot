@@ -1,5 +1,5 @@
 
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import { 
   ArrowLeft, 
   Plus, 
@@ -32,8 +32,81 @@ type MobileTab = 'patient' | 'trials' | 'details';
 const ResultsScreen: React.FC<ResultsScreenProps> = ({ results, onBack }) => {
   const [selectedTrialId, setSelectedTrialId] = useState<string | null>(results.trials[0]?.id || null);
   const [mobileTab, setMobileTab] = useState<MobileTab>('trials');
+  const [searchQuery, setSearchQuery] = useState('');
+  const [phaseFilter, setPhaseFilter] = useState('All');
+  const [savedTrialIds, setSavedTrialIds] = useState<Set<string>>(() => {
+    try {
+      const raw = localStorage.getItem('savedTrialIds');
+      return new Set(raw ? JSON.parse(raw) : []);
+    } catch {
+      return new Set();
+    }
+  });
   
   const selectedTrial = results.trials.find(t => t.id === selectedTrialId) || results.trials[0];
+
+  const filteredTrials = useMemo(() => {
+    const query = searchQuery.trim().toLowerCase();
+    return results.trials.filter((trial) => {
+      const matchesPhase = phaseFilter === 'All' || trial.phase === phaseFilter;
+      if (!query) return matchesPhase;
+      const haystack = `${trial.name} ${trial.nctId} ${trial.officialTitle}`.toLowerCase();
+      return matchesPhase && haystack.includes(query);
+    });
+  }, [results.trials, searchQuery, phaseFilter]);
+
+  const persistSaved = (next: Set<string>) => {
+    setSavedTrialIds(next);
+    localStorage.setItem('savedTrialIds', JSON.stringify(Array.from(next)));
+  };
+
+  const handleDownload = () => {
+    if (!selectedTrial) return;
+    const payload = {
+      generatedAt: new Date().toISOString(),
+      trial: selectedTrial,
+    };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${selectedTrial.nctId || 'trial'}-match.json`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  };
+
+  const handleShare = async () => {
+    if (!selectedTrial) return;
+    const link = selectedTrial.clinicalTrialsGovLink;
+    try {
+      await navigator.clipboard.writeText(link);
+      alert('Trial link copied to clipboard');
+    } catch {
+      window.open(link, '_blank', 'noopener,noreferrer');
+    }
+  };
+
+  const handleContact = () => {
+    if (!selectedTrial) return;
+    window.open(selectedTrial.clinicalTrialsGovLink, '_blank', 'noopener,noreferrer');
+  };
+
+  const handleSave = () => {
+    if (!selectedTrial) return;
+    const next = new Set(savedTrialIds);
+    if (next.has(selectedTrial.id)) {
+      next.delete(selectedTrial.id);
+    } else {
+      next.add(selectedTrial.id);
+    }
+    persistSaved(next);
+  };
+
+  const handlePrint = () => {
+    window.print();
+  };
 
   const getStatusBadge = (status: string) => {
     switch (status) {
@@ -122,7 +195,7 @@ const ResultsScreen: React.FC<ResultsScreenProps> = ({ results, onBack }) => {
               </div>
               <div>
                 <h3 className="text-base font-bold text-slate-900 leading-tight">{results.summary.split('|')[0]}</h3>
-                <p className="text-xs text-slate-500 font-medium">ID: #ME-92289</p>
+                <p className="text-xs text-slate-500 font-medium">ID: #{Date.now().toString().slice(-8)}</p>
               </div>
             </div>
 
@@ -165,11 +238,19 @@ const ResultsScreen: React.FC<ResultsScreenProps> = ({ results, onBack }) => {
             <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm space-y-3">
               <div className="flex justify-between items-center">
                 <span className="text-xs text-slate-500 font-medium">Trials Analyzed</span>
-                <span className="text-xs font-bold text-slate-900">18,402</span>
+                <span className="text-xs font-bold text-slate-900">{results.trials.length}</span>
               </div>
               <div className="flex justify-between items-center">
                 <span className="text-xs text-slate-500 font-medium">Potential Matches</span>
-                <span className="text-xs font-bold text-emerald-600">3 Found</span>
+                <span className="text-xs font-bold text-emerald-600">
+                  {results.trials.filter(t => t.status === 'match').length} Found
+                </span>
+              </div>
+              <div className="flex justify-between items-center">
+                <span className="text-xs text-slate-500 font-medium">Avg Match Score</span>
+                <span className="text-xs font-bold text-slate-700">
+                  {Math.round(results.trials.reduce((sum, t) => sum + t.matchScore, 0) / results.trials.length)}%
+                </span>
               </div>
             </div>
           </div>
@@ -188,20 +269,33 @@ const ResultsScreen: React.FC<ResultsScreenProps> = ({ results, onBack }) => {
                 <input 
                   type="text" 
                   placeholder="Filter trials..."
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
                   className="w-full pl-9 pr-4 py-2 bg-white border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500/20 outline-none transition-all"
                 />
               </div>
               <div className="hidden sm:flex gap-2">
-                <button className="flex items-center gap-2 px-3 py-1.5 border border-slate-200 rounded-lg text-xs font-bold text-slate-600 bg-white hover:bg-slate-50">
-                  Phase <ChevronDown className="w-3 h-3" />
-                </button>
+                <label className="flex items-center gap-2 px-3 py-1.5 border border-slate-200 rounded-lg text-xs font-bold text-slate-600 bg-white">
+                  Phase
+                  <ChevronDown className="w-3 h-3" />
+                  <select
+                    value={phaseFilter}
+                    onChange={(e) => setPhaseFilter(e.target.value)}
+                    className="bg-transparent outline-none text-xs font-bold text-slate-700"
+                  >
+                    <option value="All">All</option>
+                    <option value="Phase 1">Phase 1</option>
+                    <option value="Phase 2">Phase 2</option>
+                    <option value="Phase 3">Phase 3</option>
+                  </select>
+                </label>
               </div>
             </div>
             <div className="flex items-center gap-1 sm:gap-2">
-              <button className="p-2 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-lg">
+              <button onClick={handleDownload} className="p-2 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-lg">
                 <Download className="w-4 h-4" />
               </button>
-              <button className="p-2 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-lg">
+              <button onClick={handleShare} className="p-2 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-lg">
                 <Share2 className="w-4 h-4" />
               </button>
             </div>
@@ -220,7 +314,7 @@ const ResultsScreen: React.FC<ResultsScreenProps> = ({ results, onBack }) => {
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
-                {results.trials.map((trial) => (
+                {filteredTrials.map((trial) => (
                   <tr 
                     key={trial.id} 
                     onClick={() => handleTrialSelect(trial.id)}
@@ -257,6 +351,13 @@ const ResultsScreen: React.FC<ResultsScreenProps> = ({ results, onBack }) => {
                     </td>
                   </tr>
                 ))}
+                {filteredTrials.length === 0 && (
+                  <tr>
+                    <td colSpan={5} className="px-6 py-10 text-center text-sm text-slate-500">
+                      No trials match your search.
+                    </td>
+                  </tr>
+                )}
               </tbody>
             </table>
           </div>
@@ -290,11 +391,11 @@ const ResultsScreen: React.FC<ResultsScreenProps> = ({ results, onBack }) => {
                 <div className="flex flex-wrap gap-2">
                   <div className="px-3 py-1.5 bg-slate-50 rounded-lg border border-slate-100 flex items-center gap-2">
                     <Building2 className="w-3.5 h-3.5 text-slate-400" />
-                    <span className="text-[10px] font-bold text-slate-600 uppercase tracking-tighter">Sponsor: {selectedTrial.sponsor.split(' ')[0]}</span>
+                    <span className="text-[10px] font-bold text-slate-600 uppercase tracking-tighter">{selectedTrial.sponsor}</span>
                   </div>
                   <div className="px-3 py-1.5 bg-slate-50 rounded-lg border border-slate-100 flex items-center gap-2">
                     <MapPin className="w-3.5 h-3.5 text-slate-400" />
-                    <span className="text-[10px] font-bold text-slate-600 uppercase tracking-tighter">Multiple Sites</span>
+                    <span className="text-[10px] font-bold text-slate-600 uppercase tracking-tighter">US Sites</span>
                   </div>
                 </div>
               </div>
@@ -346,16 +447,16 @@ const ResultsScreen: React.FC<ResultsScreenProps> = ({ results, onBack }) => {
 
               {/* Action Buttons Container */}
               <div className="mt-auto p-6 sm:p-8 bg-slate-50 border-t border-slate-200 space-y-3">
-                <button className="w-full py-3 bg-slate-900 text-white rounded-xl font-bold text-sm hover:bg-slate-800 transition-all flex items-center justify-center gap-2 shadow-lg shadow-slate-200">
+                <button onClick={handleContact} className="w-full py-3 bg-slate-900 text-white rounded-xl font-bold text-sm hover:bg-slate-800 transition-all flex items-center justify-center gap-2 shadow-lg shadow-slate-200">
                   <Mail className="w-4 h-4" />
                   Contact Site
                 </button>
                 <div className="grid grid-cols-2 gap-3">
-                  <button className="py-2.5 bg-white border border-slate-200 text-slate-700 rounded-xl font-bold text-xs sm:text-sm hover:bg-slate-50 transition-all flex items-center justify-center gap-2">
+                  <button onClick={handleSave} className="py-2.5 bg-white border border-slate-200 text-slate-700 rounded-xl font-bold text-xs sm:text-sm hover:bg-slate-50 transition-all flex items-center justify-center gap-2">
                     <Save className="w-3.5 h-3.5" />
-                    Save
+                    {selectedTrial && savedTrialIds.has(selectedTrial.id) ? 'Saved' : 'Save'}
                   </button>
-                  <button className="py-2.5 bg-white border border-slate-200 text-slate-700 rounded-xl font-bold text-xs sm:text-sm hover:bg-slate-50 transition-all flex items-center justify-center gap-2">
+                  <button onClick={handlePrint} className="py-2.5 bg-white border border-slate-200 text-slate-700 rounded-xl font-bold text-xs sm:text-sm hover:bg-slate-50 transition-all flex items-center justify-center gap-2">
                     <FileText className="w-3.5 h-3.5" />
                     PDF
                   </button>
@@ -374,11 +475,10 @@ const ResultsScreen: React.FC<ResultsScreenProps> = ({ results, onBack }) => {
       {/* Footer Branding */}
       <footer className="h-10 bg-slate-900 border-t border-slate-800 px-4 sm:px-6 flex items-center justify-between text-white flex-shrink-0">
         <p className="text-[8px] sm:text-[10px] font-black tracking-widest uppercase opacity-60 truncate mr-4">
-          MatchEngine Precision Oncology · HIPAA Secure · Powered by Clinical-BERT, MedAlpaca & Flan-T5
+          MatchEngine Precision Oncology · Data: ClinicalTrials.gov · Assessment: Groq llama-3.3-70b
         </p>
         <div className="flex gap-4 sm:gap-6 text-[8px] sm:text-[10px] font-bold opacity-60 uppercase tracking-tight whitespace-nowrap">
-          <span className="hidden xs:inline">Auth: Dr. Smith</span>
-          <span>Session: 14:02</span>
+          <span>{new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false })}</span>
         </div>
       </footer>
     </div>

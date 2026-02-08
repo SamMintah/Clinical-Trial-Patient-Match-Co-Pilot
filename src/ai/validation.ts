@@ -1,13 +1,257 @@
 // AI output validation layer
 // Purpose: Catch obvious AI errors before displaying results to clinicians
+// Enhanced with medical guardrails for breast cancer trial matching
 
-import type { PatientProfile, MockTrial } from '@/types';
+import type { PatientProfile, MockTrial, MatchResult } from '@/types';
 
 interface ValidationResult {
   isValid: boolean;
   errors: string[];
   warnings: string[];
 }
+
+interface GuardrailResult {
+  shouldOverride: boolean;
+  overrideScore?: number;
+  overrideStatus?: 'match' | 'uncertain' | 'exclude';
+  flags: string[];
+  reasoning: string;
+}
+
+/**
+ * Medical guardrails for breast cancer trial matching
+ * Enforces deterministic clinical logic that overrides AI assessment
+ */
+export const applyMedicalGuardrails = (
+  patient: PatientProfile,
+  trial: MockTrial,
+  aiAssessment: MatchResult
+): GuardrailResult => {
+  const flags: string[] = [];
+  let shouldOverride = false;
+  let overrideScore: number | undefined;
+  let overrideStatus: 'match' | 'uncertain' | 'exclude' | undefined;
+  let reasoning = '';
+
+  // Extract patient biomarkers
+  const biomarkers = patient.biomarkers || {};
+  const biomarkerKeys = Object.keys(biomarkers).map(k => k.toLowerCase());
+  const biomarkerValues = Object.values(biomarkers).map(v => v.toLowerCase());
+  
+  const her2Status = extractBiomarkerStatus(biomarkers, 'HER2');
+  const erStatus = extractBiomarkerStatus(biomarkers, 'ER');
+  const prStatus = extractBiomarkerStatus(biomarkers, 'PR');
+  
+  // Extract trial requirements
+  const trialText = `${trial.title} ${trial.briefSummary} ${trial.inclusionCriteria.join(' ')}`.toLowerCase();
+  const exclusionText = trial.exclusionCriteria.join(' ').toLowerCase();
+
+  // Helper: Check if trial requires HER2-positive
+  const requiresHER2Positive = 
+    trialText.includes('her2+') || 
+    trialText.includes('her2-positive') || 
+    trialText.includes('her2 positive') ||
+    /\bher2\s*positive\b/.test(trialText);
+
+  // Helper: Check if trial requires HER2-negative (excluding HER2-low and HER2-positive)
+  const requiresHER2Negative = 
+    (trialText.includes('her2-negative') || 
+     trialText.includes('her2 negative') ||
+     trialText.includes('triple negative') ||
+     trialText.includes('tnbc') ||
+     /\bher2\s*negative\b/.test(trialText)) &&
+    !trialText.includes('her2-positive') &&
+    !trialText.includes('her2+') &&
+    !trialText.includes('her2 positive') &&
+    !/\bher2\s*positive\b/.test(trialText) &&
+    !trialText.includes('her2-low');
+
+  // GUARDRAIL 1: HER2 Status Mismatch
+  if (requiresHER2Positive) {
+    if (her2Status === 'negative') {
+      shouldOverride = true;
+      overrideScore = 15;
+      overrideStatus = 'exclude';
+      flags.push('HER2 status mismatch: Trial requires HER2+, patient is HER2-');
+      reasoning = 'Hard exclusion: Patient is HER2-negative but trial requires HER2-positive status. This is a fundamental eligibility criterion.';
+    } else if (her2Status === 'unknown') {
+      shouldOverride = true;
+      overrideScore = 45;
+      overrideStatus = 'uncertain';
+      flags.push('HER2 status unknown: Trial requires HER2+, patient status not documented');
+      reasoning = 'Uncertain match: HER2 status not documented. Additional testing required to determine eligibility for this HER2-positive trial.';
+    }
+  }
+
+  if (requiresHER2Negative) {
+    if (her2Status === 'positive') {
+      shouldOverride = true;
+      overrideScore = 15;
+      overrideStatus = 'exclude';
+      flags.push('HER2 status mismatch: Trial requires HER2-, patient is HER2+');
+      reasoning = 'Hard exclusion: Patient is HER2-positive but trial requires HER2-negative status.';
+    } else if (her2Status === 'unknown') {
+      shouldOverride = true;
+      overrideScore = 45;
+      overrideStatus = 'uncertain';
+      flags.push('HER2 status unknown: Trial requires HER2-, patient status not documented');
+      reasoning = 'Uncertain match: HER2 status not documented. Additional testing required to determine eligibility for this HER2-negative trial.';
+    }
+  }
+
+  // GUARDRAIL 2: Metastatic vs Early-Stage Mismatch
+  const isMetastatic = patient.stage?.toLowerCase().includes('iv') || 
+                       patient.stage?.toLowerCase().includes('metastatic') ||
+                       patient.conditions.some(c => c.toLowerCase().includes('metastatic'));
+  
+  const isEarlyStage = patient.stage?.match(/stage\s*(i|ii|iii)/i) && !isMetastatic;
+
+  if (trialText.includes('metastatic') || trialText.includes('stage iv') || trialText.includes('advanced')) {
+    if (isEarlyStage) {
+      shouldOverride = true;
+      overrideScore = 20;
+      overrideStatus = 'exclude';
+      flags.push('Stage mismatch: Trial for metastatic disease, patient has early-stage cancer');
+      reasoning = 'Hard exclusion: Trial is for metastatic/advanced breast cancer, but patient has early-stage disease.';
+    }
+  }
+
+  if (trialText.includes('early') || trialText.includes('adjuvant') || trialText.includes('neoadjuvant')) {
+    if (isMetastatic) {
+      shouldOverride = true;
+      overrideScore = 20;
+      overrideStatus = 'exclude';
+      flags.push('Stage mismatch: Trial for early-stage disease, patient has metastatic cancer');
+      reasoning = 'Hard exclusion: Trial is for early-stage breast cancer, but patient has metastatic disease.';
+    }
+  }
+
+  // GUARDRAIL 3: Prior Treatment Requirements
+  const priorTreatments = patient.priorTreatments.map(t => t.toLowerCase()).join(' ');
+  const hasPriorTrastuzumab = priorTreatments.includes('trastuzumab') || priorTreatments.includes('herceptin');
+  const hasPriorTaxane = priorTreatments.includes('taxane') || priorTreatments.includes('paclitaxel') || 
+                         priorTreatments.includes('docetaxel');
+  const hasPriorTDM1 = priorTreatments.includes('t-dm1') || priorTreatments.includes('kadcyla') || 
+                       priorTreatments.includes('trastuzumab emtansine');
+
+  // Trial requires prior trastuzumab
+  if (trialText.includes('prior trastuzumab') || trialText.includes('previous trastuzumab')) {
+    if (!hasPriorTrastuzumab) {
+      shouldOverride = true;
+      overrideScore = 25;
+      overrideStatus = 'exclude';
+      flags.push('Prior treatment requirement: Trial requires prior trastuzumab, patient has not received it');
+      reasoning = 'Hard exclusion: Trial requires prior trastuzumab therapy, but patient treatment history does not include it.';
+    }
+  }
+
+  // Trial requires prior taxane
+  if (trialText.includes('prior taxane') || trialText.includes('previous taxane')) {
+    if (!hasPriorTaxane) {
+      shouldOverride = true;
+      overrideScore = 25;
+      overrideStatus = 'exclude';
+      flags.push('Prior treatment requirement: Trial requires prior taxane, patient has not received it');
+      reasoning = 'Hard exclusion: Trial requires prior taxane-based therapy, but patient treatment history does not include it.';
+    }
+  }
+
+  // Trial excludes prior T-DM1
+  if (exclusionText.includes('t-dm1') || exclusionText.includes('trastuzumab emtansine')) {
+    if (hasPriorTDM1) {
+      shouldOverride = true;
+      overrideScore = 15;
+      overrideStatus = 'exclude';
+      flags.push('Prior treatment exclusion: Trial excludes prior T-DM1, patient has received it');
+      reasoning = 'Hard exclusion: Trial excludes patients with prior T-DM1 therapy, but patient has received it.';
+    }
+  }
+
+  // GUARDRAIL 4: ECOG Performance Status
+  const ecogMatch = patient.performanceStatus?.match(/ECOG\s*(\d)/i);
+  if (ecogMatch) {
+    const ecogScore = parseInt(ecogMatch[1]);
+    
+    // Most trials require ECOG 0-1
+    if (trialText.includes('ecog 0-1') || trialText.includes('ecog performance status 0-1')) {
+      if (ecogScore > 1) {
+        shouldOverride = true;
+        overrideScore = 30;
+        overrideStatus = 'exclude';
+        flags.push(`ECOG performance status: Trial requires ECOG 0-1, patient is ECOG ${ecogScore}`);
+        reasoning = `Hard exclusion: Trial requires ECOG performance status 0-1, but patient has ECOG ${ecogScore}.`;
+      }
+    }
+  }
+
+  // GUARDRAIL 5: Triple Negative Breast Cancer (TNBC) Consistency
+  const isTNBC = patient.conditions.some(c => c.toLowerCase().includes('triple negative') || c.toLowerCase().includes('tnbc'));
+  const trialForTNBC = trialText.includes('triple negative') || trialText.includes('tnbc');
+  
+  if (trialForTNBC && !isTNBC && her2Status === 'positive') {
+    shouldOverride = true;
+    overrideScore = 15;
+    overrideStatus = 'exclude';
+    flags.push('Subtype mismatch: Trial for TNBC, patient is HER2+');
+    reasoning = 'Hard exclusion: Trial is for triple-negative breast cancer, but patient is HER2-positive.';
+  }
+
+  // GUARDRAIL 6: Brain Metastases
+  const hasBrainMets = patient.conditions.some(c => c.toLowerCase().includes('brain met')) ||
+                       priorTreatments.includes('brain') ||
+                       priorTreatments.includes('cranial');
+  
+  if (exclusionText.includes('brain metastases') || exclusionText.includes('cns metastases')) {
+    if (hasBrainMets) {
+      shouldOverride = true;
+      overrideScore = 20;
+      overrideStatus = 'exclude';
+      flags.push('Brain metastases: Trial excludes brain/CNS metastases, patient has them');
+      reasoning = 'Hard exclusion: Trial excludes patients with brain metastases, but patient has documented CNS involvement.';
+    }
+  }
+
+  // GUARDRAIL 7: Consistency Check - Patient Profile vs AI Assessment
+  const assessmentText = aiAssessment.explanation.toLowerCase();
+  
+  // Check if AI assessment contradicts patient biomarkers
+  if (her2Status === 'positive' && assessmentText.includes('her2-negative')) {
+    flags.push('AI consistency error: Assessment mentions HER2-negative but patient is HER2-positive');
+  }
+  
+  if (her2Status === 'negative' && assessmentText.includes('her2-positive')) {
+    flags.push('AI consistency error: Assessment mentions HER2-positive but patient is HER2-negative');
+  }
+
+  if (isMetastatic && assessmentText.includes('early-stage')) {
+    flags.push('AI consistency error: Assessment mentions early-stage but patient has metastatic disease');
+  }
+
+  return {
+    shouldOverride,
+    overrideScore,
+    overrideStatus,
+    flags,
+    reasoning: reasoning || 'No guardrail overrides applied',
+  };
+};
+
+/**
+ * Helper function to extract biomarker status (positive/negative/unknown)
+ */
+const extractBiomarkerStatus = (biomarkers: Record<string, string>, marker: string): 'positive' | 'negative' | 'unknown' => {
+  const markerKey = Object.keys(biomarkers).find(k => k.toLowerCase().includes(marker.toLowerCase()));
+  if (!markerKey) return 'unknown';
+  
+  const value = biomarkers[markerKey].toLowerCase();
+  if (value.includes('positive') || value.includes('+') || value === '3+' || value === '2+') {
+    return 'positive';
+  }
+  if (value.includes('negative') || value.includes('-') || value === '0' || value === '1+') {
+    return 'negative';
+  }
+  return 'unknown';
+};
 
 /**
  * Validates patient profile extracted by AI
@@ -88,16 +332,11 @@ export const validatePatientProfile = (profile: PatientProfile): ValidationResul
 
 /**
  * Validates mock trials generated by AI
- * Ensures exactly 3 trials with required fields and realistic data
+ * Ensures trials have required fields and realistic data
  */
 export const validateMockTrials = (trials: MockTrial[]): ValidationResult => {
   const errors: string[] = [];
   const warnings: string[] = [];
-
-  // Must have exactly 3 trials
-  if (trials.length !== 3) {
-    errors.push(`Expected exactly 3 trials, got ${trials.length}`);
-  }
 
   // Validate each trial
   trials.forEach((trial, index) => {
@@ -130,39 +369,11 @@ export const validateMockTrials = (trials: MockTrial[]): ValidationResult => {
       errors.push(`Trial ${trialNum}: Must have at least 2 exclusion criteria`);
     }
 
-    // Match type validation
-    if (!['perfect', 'excluded', 'uncertain'].includes(trial.matchType)) {
-      errors.push(`Trial ${trialNum}: Invalid matchType "${trial.matchType}". Must be perfect, excluded, or uncertain`);
-    }
-
-    // Match score validation
-    if (trial.matchScore < 0 || trial.matchScore > 100) {
-      errors.push(`Trial ${trialNum}: Match score ${trial.matchScore} out of range (0-100)`);
-    }
-
-    // Score should align with matchType
-    if (trial.matchType === 'perfect' && trial.matchScore < 85) {
-      warnings.push(`Trial ${trialNum}: "perfect" match has low score (${trial.matchScore}). Expected 85+`);
-    }
-
-    if (trial.matchType === 'excluded' && trial.matchScore > 30) {
-      warnings.push(`Trial ${trialNum}: "excluded" match has high score (${trial.matchScore}). Expected <30`);
-    }
-
-    if (trial.matchType === 'uncertain' && (trial.matchScore < 40 || trial.matchScore > 75)) {
-      warnings.push(`Trial ${trialNum}: "uncertain" match score (${trial.matchScore}) outside typical range (40-75)`);
+    // Cancer type validation
+    if (!trial.cancerType || !['breast', 'lung', 'colorectal', 'prostate', 'other'].includes(trial.cancerType)) {
+      warnings.push(`Trial ${trialNum}: Invalid or missing cancerType "${trial.cancerType}"`);
     }
   });
-
-  // Check for matchType distribution (should have 1 of each)
-  const matchTypes = trials.map(t => t.matchType);
-  const hasPerfect = matchTypes.includes('perfect');
-  const hasExcluded = matchTypes.includes('excluded');
-  const hasUncertain = matchTypes.includes('uncertain');
-
-  if (!hasPerfect || !hasExcluded || !hasUncertain) {
-    warnings.push('Expected 1 perfect, 1 excluded, and 1 uncertain trial for demo variety');
-  }
 
   return {
     isValid: errors.length === 0,
@@ -173,9 +384,10 @@ export const validateMockTrials = (trials: MockTrial[]): ValidationResult => {
 
 /**
  * Sanitizes patient profile by fixing common AI extraction errors
+ * Infers biomarkers from conditions text when missing
  * Returns corrected profile with fixes applied
  */
-export const sanitizePatientProfile = (profile: PatientProfile): PatientProfile => {
+export const sanitizePatientProfile = (profile: PatientProfile, rawText?: string): PatientProfile => {
   const sanitized = { ...profile };
 
   // Fix age bounds
@@ -206,23 +418,86 @@ export const sanitizePatientProfile = (profile: PatientProfile): PatientProfile 
   });
   sanitized.biomarkers = normalizedBiomarkers;
 
-  return sanitized;
-};
+  // HEURISTIC: Infer biomarkers from all text fields if missing
+  // This reduces false "unknown" guardrail flags
+  // Check conditions, medications, and prior treatments
+  const allText = [
+    ...sanitized.conditions,
+    ...sanitized.medications,
+    ...sanitized.priorTreatments,
+    rawText || '',
+  ].join(' ').toLowerCase();
+  
+  // Infer HER2 status
+  if (!sanitized.biomarkers.HER2) {
+    if (allText.includes('her2+') || 
+        allText.includes('her2-positive') || 
+        allText.includes('her2 positive') ||
+        allText.includes('her2pos')) {
+      sanitized.biomarkers.HER2 = 'positive';
+      console.log('✓ Inferred HER2: positive from patient text');
+    } else if (allText.includes('her2-') || 
+               allText.includes('her2-negative') || 
+               allText.includes('her2 negative') ||
+               allText.includes('her2neg')) {
+      sanitized.biomarkers.HER2 = 'negative';
+      console.log('✓ Inferred HER2: negative from patient text');
+    } else if (allText.includes('triple negative') || allText.includes('tnbc')) {
+      // TNBC implies HER2-, ER-, PR-
+      sanitized.biomarkers.HER2 = 'negative';
+      console.log('✓ Inferred HER2: negative from TNBC');
+    }
+  }
 
-/**
- * Sanitizes mock trials by fixing common AI generation errors
- * Returns corrected trials array
- */
-export const sanitizeMockTrials = (trials: MockTrial[]): MockTrial[] => {
-  return trials.slice(0, 3).map(trial => ({
-    ...trial,
-    // Ensure NCT ID format
-    nctId: trial.nctId.match(/NCT\d{8}/) ? trial.nctId : `NCT${Math.floor(10000000 + Math.random() * 90000000)}`,
-    // Normalize phase format
-    phase: trial.phase.includes('1') ? 'Phase 1' : trial.phase.includes('2') ? 'Phase 2' : 'Phase 3',
-    // Clamp match score
-    matchScore: Math.max(0, Math.min(100, trial.matchScore)),
-    // Ensure matchType is valid
-    matchType: ['perfect', 'excluded', 'uncertain'].includes(trial.matchType) ? trial.matchType : 'uncertain',
-  }));
+  // Infer ER status
+  if (!sanitized.biomarkers.ER) {
+    if (allText.includes('er+') || 
+        allText.includes('er-positive') || 
+        allText.includes('er positive') ||
+        allText.includes('erpos')) {
+      sanitized.biomarkers.ER = 'positive';
+      console.log('✓ Inferred ER: positive from patient text');
+    } else if (allText.includes('er-') || 
+               allText.includes('er-negative') || 
+               allText.includes('er negative') ||
+               allText.includes('erneg')) {
+      sanitized.biomarkers.ER = 'negative';
+      console.log('✓ Inferred ER: negative from patient text');
+    } else if (allText.includes('triple negative') || allText.includes('tnbc')) {
+      sanitized.biomarkers.ER = 'negative';
+      console.log('✓ Inferred ER: negative from TNBC');
+    } else if (allText.includes('hr+') || 
+               allText.includes('hr-positive') || 
+               allText.includes('hormone receptor positive')) {
+      sanitized.biomarkers.ER = 'positive';
+      console.log('✓ Inferred ER: positive from HR+ status');
+    }
+  }
+
+  // Infer PR status
+  if (!sanitized.biomarkers.PR) {
+    if (allText.includes('pr+') || 
+        allText.includes('pr-positive') || 
+        allText.includes('pr positive') ||
+        allText.includes('prpos')) {
+      sanitized.biomarkers.PR = 'positive';
+      console.log('✓ Inferred PR: positive from patient text');
+    } else if (allText.includes('pr-') || 
+               allText.includes('pr-negative') || 
+               allText.includes('pr negative') ||
+               allText.includes('prneg')) {
+      sanitized.biomarkers.PR = 'negative';
+      console.log('✓ Inferred PR: negative from patient text');
+    } else if (allText.includes('triple negative') || allText.includes('tnbc')) {
+      sanitized.biomarkers.PR = 'negative';
+      console.log('✓ Inferred PR: negative from TNBC');
+    } else if (allText.includes('hr+') || 
+               allText.includes('hr-positive') || 
+               allText.includes('hormone receptor positive')) {
+      sanitized.biomarkers.PR = 'positive';
+      console.log('✓ Inferred PR: positive from HR+ status');
+    }
+  }
+
+  return sanitized;
 };

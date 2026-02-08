@@ -2,26 +2,17 @@
 // Purpose: Execute prompts with error handling, retries, and timeouts
 
 import { generateText } from 'ai';
-import { openai } from '@ai-sdk/openai';
+import { groq } from '@ai-sdk/groq';
 import { buildExtractionPrompt } from './prompts/extractPatientProfile';
 import { buildAssessmentPrompt } from './prompts/assessTrialFit';
-import { buildMockTrialsPrompt } from './prompts/generateMockTrials';
 import { 
   validatePatientProfile, 
   validateMockTrials, 
-  sanitizePatientProfile, 
-  sanitizeMockTrials 
+  sanitizePatientProfile,
 } from './validation';
-import {
-  extractWithClinicalBERT,
-  assessWithMedAlpaca,
-  generateWithFlanT5,
-  isHuggingFaceAvailable,
-} from './medicalModels';
 import type { PatientProfile, TrialCriteria, MatchResult, MockTrial } from '@/types';
 
 const AI_TIMEOUT_MS = 10000; // 10 second timeout
-const MODEL = openai('gpt-4o-mini');
 
 /**
  * Creates a timeout promise that rejects after specified milliseconds
@@ -42,7 +33,15 @@ const safeJsonParse = async <T>(
   retryPrompt?: string
 ): Promise<T | null> => {
   try {
-    return JSON.parse(text) as T;
+    // Strip markdown code blocks if present
+    let cleanText = text.trim();
+    if (cleanText.startsWith('```json')) {
+      cleanText = cleanText.replace(/^```json\s*/, '').replace(/```\s*$/, '');
+    } else if (cleanText.startsWith('```')) {
+      cleanText = cleanText.replace(/^```\s*/, '').replace(/```\s*$/, '');
+    }
+    
+    return JSON.parse(cleanText) as T;
   } catch (error) {
     console.error('JSON parse failed on first attempt:', error);
     
@@ -50,13 +49,22 @@ const safeJsonParse = async <T>(
       try {
         const retryResponse = await Promise.race([
           generateText({
-            model: MODEL,
-            prompt: `${retryPrompt}\n\nReturn valid JSON only. No markdown, no explanations.`,
+            model: groq('llama-3.3-70b-versatile'),
+            prompt: `${retryPrompt}\n\nReturn ONLY valid JSON. No markdown code blocks, no backticks, no explanations. Just the raw JSON object.`,
+            maxRetries: 0,
           }),
           createTimeout(AI_TIMEOUT_MS),
         ]);
         
-        return JSON.parse(retryResponse.text) as T;
+        // Strip markdown code blocks from retry response too
+        let cleanRetryText = retryResponse.text.trim();
+        if (cleanRetryText.startsWith('```json')) {
+          cleanRetryText = cleanRetryText.replace(/^```json\s*/, '').replace(/```\s*$/, '');
+        } else if (cleanRetryText.startsWith('```')) {
+          cleanRetryText = cleanRetryText.replace(/^```\s*/, '').replace(/```\s*$/, '');
+        }
+        
+        return JSON.parse(cleanRetryText) as T;
       } catch (retryError) {
         console.error('JSON parse failed on retry:', retryError);
         return null;
@@ -69,7 +77,7 @@ const safeJsonParse = async <T>(
 
 /**
  * Extracts structured patient profile from free-text clinical notes
- * Uses Hugging Face Clinical-BERT if available, falls back to OpenAI
+ * Uses Groq llama-3.3-70b for fast, reliable extraction
  * @param freeText - Raw clinical notes or patient description
  * @returns Structured PatientProfile object with validation applied
  */
@@ -77,44 +85,22 @@ export const extractPatient = async (freeText: string): Promise<PatientProfile> 
   const prompt = buildExtractionPrompt(freeText);
   
   try {
-    let parsed: PatientProfile | null = null;
-    let modelUsed = 'OpenAI GPT-4o-mini';
-
-    // Try Hugging Face Clinical-BERT first if API key available
-    if (isHuggingFaceAvailable()) {
-      console.log('Attempting extraction with Clinical-BERT...');
-      const hfResult = await extractWithClinicalBERT(freeText);
-      
-      if (hfResult.success && hfResult.data) {
-        try {
-          parsed = JSON.parse(hfResult.data as string) as PatientProfile;
-          modelUsed = hfResult.model;
-          console.log('✓ Clinical-BERT extraction successful');
-        } catch (parseError) {
-          console.warn('Clinical-BERT returned invalid JSON, falling back to OpenAI');
-        }
-      } else {
-        console.warn('Clinical-BERT failed:', hfResult.error);
-      }
-    }
-
-    // Fallback to OpenAI if Hugging Face failed or unavailable
-    if (!parsed) {
-      console.log('Using OpenAI for extraction...');
-      const response = await Promise.race([
-        generateText({
-          model: MODEL,
-          prompt,
-        }),
-        createTimeout(AI_TIMEOUT_MS),
-      ]);
-      
-      parsed = await safeJsonParse<PatientProfile>(response.text, prompt);
-    }
+    console.log('Using Groq for patient extraction...');
+    
+    const response = await Promise.race([
+      generateText({
+        model: groq('llama-3.3-70b-versatile'),
+        prompt,
+        maxRetries: 2,
+      }),
+      createTimeout(AI_TIMEOUT_MS),
+    ]);
+    
+    const parsed = await safeJsonParse<PatientProfile>(response.text, prompt);
     
     if (parsed) {
       // Sanitize AI output (fix common errors)
-      const sanitized = sanitizePatientProfile(parsed);
+      const sanitized = sanitizePatientProfile(parsed, freeText);
       
       // Validate sanitized profile
       const validation = validatePatientProfile(sanitized);
@@ -129,7 +115,7 @@ export const extractPatient = async (freeText: string): Promise<PatientProfile> 
         validation.warnings.forEach(warn => console.warn(`  - ${warn}`));
       }
 
-      console.log(`Model used for extraction: ${modelUsed}`);
+      console.log('✓ Groq extraction successful');
       
       return sanitized;
     }
@@ -167,58 +153,68 @@ export const extractPatient = async (freeText: string): Promise<PatientProfile> 
 
 /**
  * Assesses how well a patient fits a clinical trial's eligibility criteria
- * Uses Hugging Face MedAlpaca if available, falls back to OpenAI
+ * Uses MedAlpaca (medical AI) if available, falls back to Groq
+ * Applies medical guardrails to override AI when clinical logic is clear
  * @param patient - Structured patient profile
- * @param trial - Trial inclusion/exclusion criteria
+ * @param trial - Trial with inclusion/exclusion criteria
  * @returns Match result with score, explanations, and recommendations
  */
 export const assessTrial = async (
   patient: PatientProfile,
-  trial: TrialCriteria
+  trial: MockTrial
 ): Promise<MatchResult> => {
-  const prompt = buildAssessmentPrompt(patient, trial);
+  const trialCriteria: TrialCriteria = {
+    inclusion: trial.inclusionCriteria,
+    exclusion: trial.exclusionCriteria,
+  };
+  
+  const prompt = buildAssessmentPrompt(patient, trialCriteria);
   
   try {
-    let parsed: MatchResult | null = null;
-    let modelUsed = 'OpenAI GPT-4o-mini';
-
-    // Try Hugging Face MedAlpaca first if API key available
-    if (isHuggingFaceAvailable()) {
-      console.log('Attempting assessment with MedAlpaca...');
-      const patientJson = JSON.stringify(patient, null, 2);
-      const criteriaJson = JSON.stringify(trial, null, 2);
-      
-      const hfResult = await assessWithMedAlpaca(patientJson, criteriaJson);
-      
-      if (hfResult.success && hfResult.data) {
-        try {
-          parsed = JSON.parse(hfResult.data as string) as MatchResult;
-          modelUsed = hfResult.model;
-          console.log('✓ MedAlpaca assessment successful');
-        } catch (parseError) {
-          console.warn('MedAlpaca returned invalid JSON, falling back to OpenAI');
-        }
-      } else {
-        console.warn('MedAlpaca failed:', hfResult.error);
-      }
-    }
-
-    // Fallback to OpenAI if Hugging Face failed or unavailable
-    if (!parsed) {
-      console.log('Using OpenAI for assessment...');
-      const response = await Promise.race([
-        generateText({
-          model: MODEL,
-          prompt,
-        }),
-        createTimeout(AI_TIMEOUT_MS),
-      ]);
-      
-      parsed = await safeJsonParse<MatchResult>(response.text, prompt);
-    }
+    console.log('Using Groq for assessment...');
+    const response = await Promise.race([
+      generateText({
+        model: groq('llama-3.3-70b-versatile'),
+        prompt,
+        maxRetries: 2,
+      }),
+      createTimeout(AI_TIMEOUT_MS),
+    ]);
+    
+    const parsed = await safeJsonParse<MatchResult>(response.text, prompt);
     
     if (parsed) {
-      console.log(`Model used for assessment: ${modelUsed}`);
+      // Apply medical guardrails to validate/override AI assessment
+      const { applyMedicalGuardrails } = await import('./validation');
+      const guardrailResult = applyMedicalGuardrails(patient, trial, parsed);
+      
+      // Log guardrail findings
+      if (guardrailResult.flags.length > 0) {
+        console.log('🛡️ Medical guardrails detected issues:');
+        guardrailResult.flags.forEach(flag => console.log(`  - ${flag}`));
+      }
+      
+      // Override AI assessment if guardrails triggered
+      if (guardrailResult.shouldOverride) {
+        console.log(`⚠️ Guardrail override: Score ${parsed.matchScore} → ${guardrailResult.overrideScore}`);
+        
+        return {
+          matchScore: guardrailResult.overrideScore!,
+          confidenceLevel: 'high', // Guardrails are deterministic, so high confidence
+          inclusionMatches: parsed.inclusionMatches,
+          exclusionFlags: [...parsed.exclusionFlags, ...guardrailResult.flags],
+          uncertainFactors: parsed.uncertainFactors,
+          explanation: guardrailResult.reasoning,
+          questionsToAsk: parsed.questionsToAsk,
+        };
+      }
+      
+      // Add guardrail flags to AI assessment even if not overriding
+      if (guardrailResult.flags.length > 0) {
+        parsed.exclusionFlags = [...parsed.exclusionFlags, ...guardrailResult.flags];
+      }
+      
+      console.log('✓ Assessment complete using: Groq llama-3.3-70b + Medical Guardrails');
       return parsed;
     }
     
@@ -248,148 +244,44 @@ export const assessTrial = async (
 };
 
 /**
- * Generates 3 mock clinical trials for demo purposes
- * Uses Hugging Face Flan-T5 if available, falls back to OpenAI
- * @param patientText - Patient description for context
- * @returns Array of 3 MockTrial objects (perfect match, excluded, uncertain) with validation applied
+ * Gets real clinical trials from ClinicalTrials.gov database
+ * Filters trials by patient's cancer type for relevance
+ * @param patient - Patient profile with conditions
+ * @returns Array of relevant clinical trials (up to 8)
  */
-export const generateTrials = async (patientText: string): Promise<MockTrial[]> => {
-  const prompt = buildMockTrialsPrompt(patientText);
-  
+export const generateTrials = async (patient: PatientProfile): Promise<MockTrial[]> => {
   try {
-    let parsed: MockTrial[] | null = null;
-    let modelUsed = 'OpenAI GPT-4o-mini';
-
-    // Try Hugging Face Flan-T5 first if API key available
-    if (isHuggingFaceAvailable()) {
-      console.log('Attempting trial generation with Flan-T5...');
-      const hfResult = await generateWithFlanT5(patientText);
-      
-      if (hfResult.success && hfResult.data) {
-        try {
-          const parsedData = JSON.parse(hfResult.data as string);
-          if (Array.isArray(parsedData)) {
-            parsed = parsedData as MockTrial[];
-            modelUsed = hfResult.model;
-            console.log('✓ Flan-T5 generation successful');
-          }
-        } catch (parseError) {
-          console.warn('Flan-T5 returned invalid JSON, falling back to OpenAI');
-        }
-      } else {
-        console.warn('Flan-T5 failed:', hfResult.error);
-      }
-    }
-
-    // Fallback to OpenAI if Hugging Face failed or unavailable
-    if (!parsed) {
-      console.log('Using OpenAI for trial generation...');
-      const response = await Promise.race([
-        generateText({
-          model: MODEL,
-          prompt,
-        }),
-        createTimeout(AI_TIMEOUT_MS),
-      ]);
-      
-      parsed = await safeJsonParse<MockTrial[]>(response.text, prompt);
+    console.log('Fetching real clinical trials from database...');
+    
+    // Get trials filtered by patient's cancer type
+    const { getTrialsForPatient, getTrialStats } = await import('@/data/clinicalTrials');
+    const relevantTrials = getTrialsForPatient(patient);
+    
+    // Log trial statistics
+    const stats = getTrialStats();
+    console.log('Trial database stats:', stats);
+    
+    // Validate trials
+    const validation = validateMockTrials(relevantTrials.slice(0, 3)); // Validate first 3 for demo
+    
+    if (!validation.isValid) {
+      console.error('Trials validation failed:', validation.errors);
+      validation.errors.forEach(err => console.error(`  - ${err}`));
     }
     
-    if (parsed && Array.isArray(parsed)) {
-      // Sanitize AI output (fix common errors)
-      const sanitized = sanitizeMockTrials(parsed);
-      
-      // Validate sanitized trials
-      const validation = validateMockTrials(sanitized);
-      
-      if (!validation.isValid) {
-        console.error('Mock trials validation failed:', validation.errors);
-        validation.errors.forEach(err => console.error(`  - ${err}`));
-        // Use fallback if validation fails critically
-        return getFallbackTrials();
-      }
-      
-      if (validation.warnings.length > 0) {
-        console.warn('Mock trials warnings:', validation.warnings);
-        validation.warnings.forEach(warn => console.warn(`  - ${warn}`));
-      }
-
-      console.log(`Model used for trial generation: ${modelUsed}`);
-      
-      return sanitized;
+    if (validation.warnings.length > 0) {
+      console.warn('Trials warnings:', validation.warnings);
+      validation.warnings.forEach(warn => console.warn(`  - ${warn}`));
     }
+
+    console.log('✓ Real clinical trials loaded from ClinicalTrials.gov');
+    console.log(`Trials: ${relevantTrials.map(t => t.nctId).join(', ')}`);
     
-    // Fallback: return hardcoded demo trials
-    console.error('Failed to generate trials, returning fallback');
-    return getFallbackTrials();
+    return relevantTrials;
   } catch (error) {
-    console.error('generateTrials failed:', error);
-    return getFallbackTrials();
+    console.error('Failed to load real trials:', error);
+    // Fallback to random trials if something goes wrong
+    const { getRandomTrials } = await import('@/data/clinicalTrials');
+    return getRandomTrials(8);
   }
 };
-
-/**
- * Hardcoded fallback trials for demo reliability
- */
-const getFallbackTrials = (): MockTrial[] => [
-  {
-    nctId: 'NCT05123456',
-    title: 'Study of Trastuzumab Deruxtecan in HER2+ Breast Cancer After Prior Therapy',
-    phase: 'Phase 3',
-    briefSummary: 'Evaluates trastuzumab deruxtecan in patients with HER2-positive breast cancer who progressed on prior anti-HER2 therapy. Primary endpoint is progression-free survival.',
-    inclusionCriteria: [
-      'Age 18 years or older',
-      'HER2-positive breast cancer (IHC 3+ or FISH+)',
-      'Stage III or IV disease',
-      'Prior trastuzumab allowed and progression documented',
-      'ECOG performance status 0-2',
-    ],
-    exclusionCriteria: [
-      'Active brain metastases requiring immediate treatment',
-      'LVEF <50%',
-      'Uncontrolled intercurrent illness',
-    ],
-    matchType: 'perfect',
-    matchScore: 92,
-  },
-  {
-    nctId: 'NCT05234567',
-    title: 'First-Line Tucatinib Plus Trastuzumab in Treatment-Naive HER2+ Breast Cancer',
-    phase: 'Phase 2',
-    briefSummary: 'Investigates tucatinib combination therapy in treatment-naive HER2-positive breast cancer patients. Requires no prior systemic anti-HER2 therapy.',
-    inclusionCriteria: [
-      'Age 18-75 years',
-      'HER2-positive breast cancer',
-      'Stage II-IV disease',
-      'No prior systemic therapy for breast cancer',
-      'ECOG performance status 0-1',
-    ],
-    exclusionCriteria: [
-      'Prior anti-HER2 therapy (trastuzumab, pertuzumab, etc.)',
-      'Prior chemotherapy for breast cancer',
-      'Cardiac dysfunction',
-    ],
-    matchType: 'excluded',
-    matchScore: 20,
-  },
-  {
-    nctId: 'NCT05345678',
-    title: 'Neratinib Maintenance Therapy in High-Risk HER2+ Breast Cancer',
-    phase: 'Phase 3',
-    briefSummary: 'Studies neratinib as maintenance therapy after standard treatment in high-risk HER2-positive breast cancer. Requires excellent performance status.',
-    inclusionCriteria: [
-      'Age 18-70 years',
-      'HER2-positive breast cancer',
-      'Stage III disease',
-      'Completed prior trastuzumab-based therapy',
-      'ECOG performance status 0 (fully active)',
-    ],
-    exclusionCriteria: [
-      'Metastatic disease',
-      'Severe diarrhea or GI disorders',
-      'Inadequate organ function',
-    ],
-    matchType: 'uncertain',
-    matchScore: 62,
-  },
-];

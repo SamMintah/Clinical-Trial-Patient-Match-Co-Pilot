@@ -45,8 +45,7 @@ export interface MockTrial {
   briefSummary: string;
   inclusionCriteria: string[];
   exclusionCriteria: string[];
-  matchType: 'perfect' | 'excluded' | 'uncertain';
-  matchScore: number;
+  cancerType: 'breast' | 'lung' | 'colorectal' | 'prostate' | 'other';
 }
 
 // Types for new UI components

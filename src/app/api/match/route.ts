@@ -8,29 +8,6 @@ interface MatchRequest {
   patientText: string;
 }
 
-interface TrialMatch {
-  trial: {
-    nctId: string;
-    title: string;
-    phase: string;
-    briefSummary: string;
-    inclusionCriteria: string[];
-    exclusionCriteria: string[];
-    matchType: string;
-    matchScore: number;
-  };
-  result: {
-    matchScore: number;
-    confidenceLevel: string;
-    inclusionMatches: string[];
-    exclusionFlags: string[];
-    uncertainFactors: string[];
-    explanation: string;
-    questionsToAsk: string[];
-  };
-  rank: number;
-}
-
 /**
  * POST handler for clinical trial matching
  * Accepts patient free-text, extracts profile, generates trials, and assesses matches
@@ -57,30 +34,34 @@ export const POST = async (request: NextRequest): Promise<NextResponse> => {
 
     // Log patient input (truncated for privacy)
     console.log('Matching patient:', patientText.slice(0, 50));
+    const startTime = Date.now();
 
     // Step 1: Extract structured patient profile from free-text
+    console.log('Step 1: Extracting patient profile...');
     const profile = await extractPatient(patientText);
+    console.log(`✓ Extraction complete in ${Date.now() - startTime}ms`);
 
-    // Step 2: Generate mock trials tailored to patient
-    const trials = await generateTrials(patientText);
+    // Step 2: Load real trials filtered by patient's cancer type
+    console.log('Step 2: Loading relevant trials...');
+    const trialsStart = Date.now();
+    const trials = await generateTrials(profile);
+    console.log(`✓ Trials loaded in ${Date.now() - trialsStart}ms`);
 
-    // Step 3: Assess each trial against patient profile
-    const matches: TrialMatch[] = [];
-    
-    for (const trial of trials) {
-      const criteria = {
-        inclusion: trial.inclusionCriteria,
-        exclusion: trial.exclusionCriteria,
-      };
+    // Step 3: Assess all trials in parallel for speed
+    console.log('Step 3: Assessing trial eligibility (parallel)...');
+    const assessStart = Date.now();
+    const assessmentPromises = trials.map(async (trial) => {
+      const result = await assessTrial(profile, trial);
       
-      const result = await assessTrial(profile, criteria);
-      
-      matches.push({
+      return {
         trial,
         result,
         rank: 0, // Will be calculated after sorting
-      });
-    }
+      };
+    });
+
+    const matches = await Promise.all(assessmentPromises);
+    console.log(`✓ All assessments complete in ${Date.now() - assessStart}ms`);
 
     // Step 4: Sort matches by score (descending)
     matches.sort((a, b) => b.result.matchScore - a.result.matchScore);
@@ -89,6 +70,9 @@ export const POST = async (request: NextRequest): Promise<NextResponse> => {
     matches.forEach((match, index) => {
       match.rank = index + 1;
     });
+
+    const totalTime = Date.now() - startTime;
+    console.log(`✓ Total matching pipeline complete in ${totalTime}ms`);
 
     // Return successful response with CORS headers
     return NextResponse.json(

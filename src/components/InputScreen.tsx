@@ -1,10 +1,11 @@
 
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { Loader2, Zap, FileText, ClipboardList, Info, Activity, History, ChevronRight, Upload, CheckCircle2 } from 'lucide-react';
 import { createWorker } from 'tesseract.js';
+import { getConsultationHistory, formatRelativeTime, type ConsultationRecord } from '@/utils/consultationHistory';
 
 interface InputScreenProps {
-  onMatch: (notes: string) => void;
+  onMatch: (notes: string) => Promise<void>;
   initialValue?: string;
 }
 
@@ -13,28 +14,139 @@ const InputScreen: React.FC<InputScreenProps> = ({ onMatch, initialValue = '' })
   const [isLoading, setIsLoading] = useState(false);
   const [isScanning, setIsScanning] = useState(false);
   const [scanComplete, setScanComplete] = useState(false);
+  const [history, setHistory] = useState<ConsultationRecord[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const DEMO_TEXT = "52yo female, Stage IV HER2+ breast cancer. Progressed on Trastuzumab and Docetaxel last month. New lesions in liver. ECOG 1. No brain mets.";
+  // Load consultation history on mount and when returning from results
+  useEffect(() => {
+    const refreshHistory = () => {
+      setHistory(getConsultationHistory());
+    };
+    
+    // Initial load
+    refreshHistory();
+    
+    // Refresh when window gains focus (user returns from another tab)
+    window.addEventListener('focus', refreshHistory);
+    
+    // Refresh periodically to catch updates
+    const interval = setInterval(refreshHistory, 1000);
+    
+    return () => {
+      window.removeEventListener('focus', refreshHistory);
+      clearInterval(interval);
+    };
+  }, []);
+
+  const generateRandomDemo = (): string => {
+    const ages = ['45', '52', '58', '61', '49', '67'];
+    const stages = ['Stage II', 'Stage III', 'Stage IV'];
+    const her2Status = ['HER2+', 'HER2-', 'HER2+ ER+', 'HER2+ ER- PR-'];
+    const priorTreatments = [
+      'Progressed on Trastuzumab and Docetaxel',
+      'Failed Pertuzumab and Paclitaxel',
+      'Completed AC-T regimen',
+      'Progressed on T-DM1',
+      'Failed first-line Trastuzumab',
+      'Completed neoadjuvant therapy with residual disease'
+    ];
+    const metastases = [
+      'New lesions in liver',
+      'Bone metastases detected',
+      'Lung nodules present',
+      'No distant metastases',
+      'Brain metastases stable on radiation',
+      'Lymph node involvement'
+    ];
+    const ecogScores = ['ECOG 0', 'ECOG 1', 'ECOG 2'];
+    const additionalInfo = [
+      'No brain mets.',
+      'Adequate organ function.',
+      'Left ventricular ejection fraction 55%.',
+      'No significant cardiac history.',
+      'Willing to participate in clinical trial.',
+      'Recent imaging shows progression.'
+    ];
+
+    const age = ages[Math.floor(Math.random() * ages.length)];
+    const stage = stages[Math.floor(Math.random() * stages.length)];
+    const her2 = her2Status[Math.floor(Math.random() * her2Status.length)];
+    const treatment = priorTreatments[Math.floor(Math.random() * priorTreatments.length)];
+    const mets = metastases[Math.floor(Math.random() * metastases.length)];
+    const ecog = ecogScores[Math.floor(Math.random() * ecogScores.length)];
+    const info = additionalInfo[Math.floor(Math.random() * additionalInfo.length)];
+
+    return `${age}yo female, ${stage} ${her2} breast cancer. ${treatment} last month. ${mets}. ${ecog}. ${info}`;
+  };
 
   const handleLoadDemo = () => {
-    setNotes(DEMO_TEXT);
+    setNotes(generateRandomDemo());
     setScanComplete(false);
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleLoadHistory = (item: ConsultationRecord) => {
+    // Handle legacy records that don't have originalNotes
+    if (item.originalNotes) {
+      setNotes(item.originalNotes);
+      setScanComplete(false);
+    } else {
+      // Fallback: use patient summary if originalNotes not available
+      alert('This consultation was saved before notes tracking was enabled. Please enter notes manually.');
+    }
+  };
+
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (notes.length < 20) return;
     setIsLoading(true);
-    setTimeout(() => {
+    
+    try {
+      await onMatch(notes);
+    } catch (error) {
+      console.error('Match failed:', error);
+    } finally {
       setIsLoading(false);
-      onMatch(notes);
-    }, 1500);
+    }
   };
 
   const handleUploadClick = () => {
     fileInputRef.current?.click();
   };
+
+  const preprocessCanvas = (canvas: HTMLCanvasElement): HTMLCanvasElement => {
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return canvas;
+    const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    const data = imageData.data;
+    const contrast = 1.3; // slight contrast boost
+    const intercept = 128 * (1 - contrast);
+    for (let i = 0; i < data.length; i += 4) {
+      const r = data[i];
+      const g = data[i + 1];
+      const b = data[i + 2];
+      const lum = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+      const v = Math.min(255, Math.max(0, lum * contrast + intercept));
+      data[i] = v;
+      data[i + 1] = v;
+      data[i + 2] = v;
+    }
+    ctx.putImageData(imageData, 0, 0);
+    return canvas;
+  };
+
+  const imageFileToCanvas = async (file: File): Promise<HTMLCanvasElement> => {
+    const bitmap = await createImageBitmap(file);
+    const scale = 2;
+    const canvas = document.createElement('canvas');
+    canvas.width = bitmap.width * scale;
+    canvas.height = bitmap.height * scale;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return canvas;
+    ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+    return preprocessCanvas(canvas);
+  };
+
+
 
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -42,7 +154,7 @@ const InputScreen: React.FC<InputScreenProps> = ({ onMatch, initialValue = '' })
 
     // Validate file type (images only)
     if (!file.type.startsWith('image/')) {
-      alert('Please upload an image file (PNG, JPG, PDF scan)');
+      alert('Please upload an image file');
       return;
     }
 
@@ -59,9 +171,11 @@ const InputScreen: React.FC<InputScreenProps> = ({ onMatch, initialValue = '' })
     try {
       // Initialize Tesseract worker
       const worker = await createWorker('eng');
-      
-      // Perform OCR
-      const { data: { text } } = await worker.recognize(file);
+
+      // Preprocess then OCR
+      const canvas = await imageFileToCanvas(file);
+      const dataUrl = canvas.toDataURL('image/png');
+      const { data: { text } } = await worker.recognize(dataUrl);
       
       // Clean up worker
       await worker.terminate();
@@ -263,29 +377,34 @@ const InputScreen: React.FC<InputScreenProps> = ({ onMatch, initialValue = '' })
               <History className="w-4 h-4" />
               Recent Consultations
             </h2>
-            <div className="space-y-3">
-              {[
-                { id: "421", diagnosis: "Metastatic BC", match: "High", date: "12m ago" },
-                { id: "419", diagnosis: "NSCLC Stage IV", match: "None", date: "2h ago" },
-                { id: "418", diagnosis: "RCC Clear Cell", match: "Med", date: "1d ago" }
-              ].map((item) => (
-                <div key={item.id} className="flex items-center justify-between p-2.5 rounded-lg hover:bg-slate-50 border border-transparent hover:border-slate-100 transition-all cursor-pointer group">
-                  <div className="min-w-0">
-                    <div className="text-[11px] font-bold text-slate-800">Report #{item.id}</div>
-                    <div className="text-[9px] text-slate-500 truncate">{item.diagnosis}</div>
-                  </div>
-                  <div className="text-right">
-                    <div className={`text-[9px] font-bold uppercase ${item.match === 'High' ? 'text-emerald-600' : item.match === 'Med' ? 'text-amber-600' : 'text-slate-400'}`}>
-                      {item.match}
+            {history.length === 0 ? (
+              <div className="text-center py-8">
+                <History className="w-8 h-8 text-slate-300 mx-auto mb-3" />
+                <p className="text-xs text-slate-400 mb-2">No recent consultations</p>
+                <p className="text-[10px] text-slate-300">Your analysis history will appear here</p>
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {history.slice(0, 5).map((item) => (
+                  <button
+                    key={item.id}
+                    onClick={() => handleLoadHistory(item)}
+                    className="w-full flex items-center justify-between p-2.5 rounded-lg hover:bg-slate-50 border border-transparent hover:border-slate-100 transition-all cursor-pointer text-left"
+                  >
+                    <div className="min-w-0">
+                      <div className="text-[11px] font-bold text-slate-800 truncate">{item.diagnosis}</div>
+                      <div className="text-[9px] text-slate-500 truncate">{item.patientSummary}</div>
                     </div>
-                    <div className="text-[8px] text-slate-400 group-hover:text-indigo-500 transition-colors">{item.date}</div>
-                  </div>
-                </div>
-              ))}
-            </div>
-            <button className="w-full mt-5 py-2 text-[10px] font-bold text-slate-400 hover:text-indigo-600 border border-dashed border-slate-200 rounded-lg transition-colors">
-              View History Protocol
-            </button>
+                    <div className="text-right ml-2">
+                      <div className={`text-[9px] font-bold uppercase ${item.matchType === 'High' ? 'text-emerald-600' : item.matchType === 'Med' ? 'text-amber-600' : 'text-slate-400'}`}>
+                        {item.matchType}
+                      </div>
+                      <div className="text-[8px] text-slate-400">{formatRelativeTime(item.timestamp)}</div>
+                    </div>
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
         </div>
       </div>
