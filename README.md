@@ -218,7 +218,7 @@ src/
 │       ├── extractPatientProfile.ts
 │       └── assessTrialFit.ts
 ├── data/
-│   ├── clinical-trials.json    # 15 real trials from ClinicalTrials.gov
+│   ├── clinical-trials.json    # 100 real trials from ClinicalTrials.gov
 │   └── clinicalTrials.ts       # Trial filtering logic
 ├── utils/
 │   └── consultationHistory.ts  # localStorage history management
